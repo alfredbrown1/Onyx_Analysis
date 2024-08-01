@@ -1,0 +1,90 @@
+import pandas as pd
+import matplotlib.pyplot as plt
+import numpy as np
+import json
+from tqdm import tqdm
+
+def load_data(file_path):
+    return pd.read_csv(file_path)
+
+def filter_and_sort_data(df, threshold=1):
+    df_filtered = df[df['Barcodes (%)'] > threshold]
+    return df_filtered.sort_values('Barcodes (%)', ascending=False)
+
+def strip_suffix(gene):
+    if gene.endswith('_1') or gene.endswith('_2'):
+        return gene[:-2]
+    return gene
+
+def annotate_go_terms(df, go_data_path):
+    df['GO_biological_process'] = 'not categorised'
+    
+    with open(go_data_path, 'r') as f:
+        go_data = json.load(f)
+    
+    group_list = go_data.get('overrepresentation', {}).get('group', [])
+    
+    for i in tqdm(df.index, desc="Processing genes"):
+        stripped_gene_name = strip_suffix(df.loc[i, 'Genes'])
+        for group in tqdm(group_list, desc="Processing groups", leave=False):
+            for result in group.get('result', []):
+                if not isinstance(result, dict):
+                    continue
+                input_list = result.get('input_list', {})
+                if isinstance(input_list, dict):
+                    mapped_ids = input_list.get('mapped_id_list', {}).get('mapped_id', [])
+                else:
+                    mapped_ids = []
+                if stripped_gene_name in mapped_ids:
+                    df.loc[i, 'GO_biological_process'] = result.get('term', {}).get('label', 'not categorised')
+                    break
+            if df.loc[i, 'GO_biological_process'] != 'not categorised':
+                break
+    return df
+
+def create_pie_chart(df, output_path):
+    other = df[df['Barcodes (%)'] <= 1]['Barcodes (%)'].sum()
+    pie_data = df.copy()
+    pie_data = pie_data.append({'Genes': 'Other', 'Barcodes (%)': other, 'GO_biological_process': 'Other'}, ignore_index=True)
+
+    go_processes = pie_data['GO_biological_process'].unique()
+    color_map = plt.cm.get_cmap('tab20')(np.linspace(0, 1, len(go_processes)))
+    color_dict = dict(zip(go_processes, color_map))
+
+    plt.figure(figsize=(12, 10))
+    wedges, texts, autotexts = plt.pie(pie_data['Barcodes (%)'], 
+                                       labels=pie_data['Genes'], 
+                                       autopct='%1.1f%%', 
+                                       colors=[color_dict[go] for go in pie_data['GO_biological_process']],
+                                       textprops={'fontsize': 8})
+
+    plt.setp(texts, size=8)
+    plt.setp(autotexts, size=8, weight="bold")
+
+    plt.title('Barcode Count After 7 Growths', fontsize=16)
+
+    legend_elements = [plt.Rectangle((0,0),1,1, facecolor=color_dict[go], edgecolor='none') for go in go_processes]
+    plt.legend(legend_elements, go_processes, title='GO Biological Process', 
+               loc='center left', bbox_to_anchor=(1, 0.5), fontsize=8)
+
+    plt.axis('equal')
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+def main():
+    # File paths
+    data_file = 'M7_PieChart.csv'
+    go_data_file = 'PantherDB GO Analysis.json'
+    output_file = 'gene_distribution_pie_chart.png'
+
+    # Load and process data
+    df = load_data(data_file)
+    df_filtered = filter_and_sort_data(df)
+    df_annotated = annotate_go_terms(df_filtered, go_data_file)
+
+    # Create and save pie chart
+    create_pie_chart(df_annotated, output_file)
+
+if __name__ == "__main__":
+    main()
