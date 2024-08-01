@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import json
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pydeseq2.dds import DeseqDataSet
+from pydeseq2.ds import DeseqStats
+
+def load_and_prepare_data(gene_count_file, metadata_file):
+    """Load and prepare gene count and metadata."""
+    data = pd.read_csv(gene_count_file, index_col=0).fillna(0)
+    metadata = pd.read_csv(metadata_file, index_col='Sample')
+    return data, metadata
+
+def filter_data(data, metadata, conditions):
+    """Filter data and metadata based on specified conditions."""
+    filtered_metadata = metadata[metadata['Condition'].isin(conditions)]
+    filtered_data = data.loc[filtered_metadata.index]
+    filtered_metadata = filtered_metadata.reindex(filtered_data.index)
+    return filtered_data, filtered_metadata
+
+def run_deseq2(data, metadata, design_factor, contrast):
+    """Run DESeq2 analysis."""
+    dds = DeseqDataSet(counts=data, metadata=metadata, design_factors=design_factor)
+    dds.deseq2()
+    stat_res = DeseqStats(dds, contrast=contrast)
+    res = stat_res.results_df
+    return res[res.baseMean >= 10]
+
+def load_go_data(file_path):
+    """Load GO data from JSON file."""
+    with open(file_path, 'r') as f:
+        go_data = json.load(f)
+    return go_data.get('overrepresentation', {}).get('group', [])
+
+def strip_suffix(gene_name):
+    """Strip suffixes from gene names."""
+    return gene_name[:-2] if gene_name.endswith(('_1', '_2')) else gene_name
+
+def annotate_go_terms(res, group_list):
+    """Annotate GO terms for genes."""
+    res['GO_biological_process'] = 'not categorised'
+    for i in tqdm(res.index, desc="Processing genes"):
+        stripped_gene_name = strip_suffix(i)
+        for group in tqdm(group_list, desc="Processing groups", leave=False):
+            for result in group.get('result', []):
+                if not isinstance(result, dict):
+                    continue
+                input_list = result.get('input_list', {})
+                mapped_ids = input_list.get('mapped_id_list', {}).get('mapped_id', []) if isinstance(input_list, dict) else []
+                if stripped_gene_name in mapped_ids:
+                    res.loc[i, 'GO_biological_process'] = result.get('term', {}).get('label', 'not categorised')
+                    break
+            if res.loc[i, 'GO_biological_process'] != 'not categorised':
+                break
+    return res
+
+def create_volcano_plot(res, output_file):
+    """Create and save a volcano plot."""
+    res['-log10(padj)'] = -(np.log10(res['padj']))
+    cut_off_padj = 0.05
+    cut_off_logFC = 2
+
+    outliers_padj = res.nsmallest(7, 'padj')
+    outliers_fc_small = res.nsmallest(3, 'log2FoldChange')
+    outliers_fc_large = res.nlargest(3, 'log2FoldChange')
+    all_outliers = pd.concat([outliers_padj, outliers_fc_small, outliers_fc_large]).drop_duplicates()
+
+    fig, ax = plt.subplots(figsize=(14, 10))
+
+    res['color_category'] = 'Not Significant'
+    significant_mask = (res['padj'] < cut_off_padj)
+    res.loc[significant_mask, 'color_category'] = res.loc[significant_mask, 'GO_biological_process']
+
+    categories = res['color_category'].unique()
+    palette = sns.color_palette("husl", n_colors=len(categories) + 1)
+    color_dict = dict(zip(categories, palette[:len(categories)]))
+    color_dict['Not Significant'] = 'grey'
+    color_dict['chorismate metabolic process'] = '#FFB6C1'
+
+    scatter = sns.scatterplot(x="log2FoldChange", y='-log10(padj)', 
+                              hue='color_category', palette=color_dict,
+                              alpha=0.7, sizes=(20, 200),
+                              data=res, ax=ax, legend=False)
+
+    for i, index in enumerate(all_outliers.index):
+        ha = 'right' if i % 2 == 0 else 'left'
+        x_offset = -0.5 if i % 2 == 0 else 0.5
+        ax.text(res.loc[index, 'log2FoldChange'] + x_offset,
+                -np.log10(res.loc[index, 'padj']), 
+                index, fontsize=8, ha=ha, va='center', color='black')
+
+    ax.set_xlim(-15, 15)
+    ax.set_ylim(0, 40)
+    ax.spines['right'].set_visible(False)
+    ax.spines['top'].set_visible(False)
+    ax.vlines([-cut_off_logFC, cut_off_logFC], *ax.get_ylim(), color='dimgrey', linestyle='dashed', linewidth=1)
+    ax.hlines(-np.log10(cut_off_padj), *ax.get_xlim(), color='dimgrey', linestyle='dashed', linewidth=1)
+    ax.set_ylabel('-log10(padj)', fontweight='bold')
+    ax.set_xlabel('log2(fold change)', fontweight='bold')
+    ax.set_title('Fold change in LB after 2 Growths', fontsize=16)
+
+    handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=v, markersize=8, alpha=0.7) 
+               for k, v in color_dict.items() if k != 'Not Significant']
+    labels = [k for k in color_dict.keys() if k != 'Not Significant']
+    handles.append(plt.Line2D([0], [0], marker='o', color='w', markerfacecolor='grey', markersize=8, alpha=0.7))
+    labels.append('Not Significant')
+
+    ax.legend(handles=handles, labels=labels, title='GO Biological Process', 
+              loc='center left', bbox_to_anchor=(1, 0.5), ncol=1)
+
+    plt.tight_layout()
+    plt.savefig(output_file)
+    plt.close()
+
+def main():
+    # File paths
+    gene_count_file = 'path/to/GeneCount1207.csv'
+    metadata_file = 'path/to/metadata.csv'
+    go_data_file = 'path/to/PantherDB GO Analysis.json'
+    output_plot = 'volcano_plot.png'
+
+    # Load and prepare data
+    data, metadata = load_and_prepare_data(gene_count_file, metadata_file)
+
+    # Filter data
+    filtered_data, filtered_metadata = filter_data(data, metadata, ['L2', 'C'])
+
+    # Run DESeq2
+    res = run_deseq2(filtered_data, filtered_metadata, "Condition", ('Condition', 'L2', 'C'))
+
+    # Load GO data and annotate
+    group_list = load_go_data(go_data_file)
+    res = annotate_go_terms(res, group_list)
+
+    # Create and save volcano plot
+    create_volcano_plot(res, output_plot)
+
+if __name__ == "__main__":
+    main()
