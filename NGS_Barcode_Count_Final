@@ -1,0 +1,76 @@
+import pandas as pd
+from Bio import SeqIO
+import os
+
+def reverse_complement(seq):
+    """Get the reverse complement of a DNA sequence."""
+    complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
+    return ''.join(complement[base] for base in reversed(seq))
+
+def process_barcode_file(input_file, output_file):
+    """Process the barcode file and add reverse complement."""
+    df = pd.read_csv(input_file, usecols=['TargetName', 'BarcodeSeq'], header=1)
+    df['ReverseComplement'] = df['BarcodeSeq'].apply(reverse_complement)
+    df.to_csv(output_file, index=False)
+    print(f"Dataframe with reverse complement saved to {output_file}")
+
+def read_barcodes_from_csv(csv_file):
+    """Read barcode CSV file and return a dictionary for both BarcodeSeq and ReverseComplement."""
+    df = pd.read_csv(csv_file, header=0)
+    barcode_dict = pd.Series(df.TargetName.values, index=df.BarcodeSeq).to_dict()
+    reverse_complement_dict = pd.Series(df.TargetName.values, index=df.ReverseComplement).to_dict()
+    return {**barcode_dict, **reverse_complement_dict}
+
+def identify_barcodes(fastq_file, barcode_dict):
+    """Identify barcodes in FASTQ file and create a dictionary."""
+    identifier_gene_dict = {}
+    with open(fastq_file, 'r') as f:
+        for record in SeqIO.parse(f, 'fastq'):
+            identifier = record.id
+            sequence = str(record.seq)
+            for barcode, gene_name in barcode_dict.items():
+                if barcode in sequence:
+                    identifier_gene_dict[identifier] = gene_name
+                    break
+    return identifier_gene_dict
+
+def count_gene_occurrences(identifier_gene_dict):
+    """Count the occurrences of each gene name."""
+    return pd.Series(identifier_gene_dict.values()).value_counts().to_dict()
+
+def process_fastq_files(folders, barcode_dict):
+    """Process FASTQ files from multiple folders."""
+    dictionaries = []
+    index = []
+    for folder in folders:
+        for file_name in os.listdir(folder):
+            if file_name.endswith('.fastq'):
+                fastq_file = os.path.join(folder, file_name)
+                identifier_gene_dict = identify_barcodes(fastq_file, barcode_dict)
+                gene_counts = count_gene_occurrences(identifier_gene_dict)
+                dictionaries.append(gene_counts)
+                index.append(file_name[:-10])
+    return pd.DataFrame(dictionaries, index=index)
+
+def main():
+    # File paths
+    input_barcode_file = 'path/to/input/DesignLibraryDetails.csv'
+    output_barcode_file = 'path/to/output/Barcode_ref.csv'
+    fastq_folders = ['path/to/baseline/folder', 'path/to/raw_fastq/folder']
+    output_csv = 'GeneCountGrowth.csv'
+
+    # Process barcode file
+    process_barcode_file(input_barcode_file, output_barcode_file)
+
+    # Read barcode dictionary from CSV
+    barcode_dict = read_barcodes_from_csv(output_barcode_file)
+
+    # Process FASTQ files
+    df = process_fastq_files(fastq_folders, barcode_dict)
+
+    # Save results
+    df.to_csv(output_csv)
+    print(f"Gene count data saved to {output_csv}")
+
+if __name__ == "__main__":
+    main()
